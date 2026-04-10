@@ -14,8 +14,7 @@ jobs:
         run: |
           if [ -f action.yml ]; then
             echo "Validating action.yml..."
-            # Add any validation steps here, e.g., checking the name field
-            grep -q 'name: new' action.yml || (echo "Action name not updated correctly." && exit 1)
+            grep -q '^name: DMD Cloud Production Deploy$' action.yml || (echo "Unexpected action name in action.yml." && exit 1)
           else
             echo "action.yml not found."
             exit 1
