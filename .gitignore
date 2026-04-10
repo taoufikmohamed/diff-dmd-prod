@@ -1,0 +1,134 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+venv3/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Virtualenv
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.txt
+
+# Secrets and env
+.env
+*.env
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+# Docker
+.docker/
+.dockerignore
+.envrc
+docker-compose.override.yml
+docker-compose.*.yml
+docker-compose.yml
+**/docker-compose.override.yml
+**/docker-compose.yml
+
+# Docker credentials
+.docker/config.json
+
+# Kubernetes & kube config
+.kube/
+Kubeconfig
+kubeconfig
+.kubeconfig
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+terraform.tfvars.json
+crash.log
+override.tf
+override.tf.json
+*.tfvars
+
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Python packaging
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Misc
+node_modules/
+coverage/
+htmlcov/
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+*.svg
+*.ico
+*.tif
+*.tiff
+*.avif
+*.heic
+
+# Folders and Files
+- `bootstrap-enduser.ps1`
+- `deploy-production.ps1`
+- `terraform/`
+- `k8s/production/`
+- `.github/workflows/deploy-production.yml`
+
+### Optional or non-critical services
+
+- `orchestrator/`
+- `run-workflow-nondeploy.ps1`
+
+### Auxiliary test and sample assets
+
+- `test-workflow.ps1`
+- `test-webhook.json`
+- `logs.txt`
+
+### Cleanup/history artifacts
+
+- `cleanup-phase2.ps1`
+- `CLEANUP_PHASE2_REPORT.md`
+- `CLEANUP_SUMMARY.md`
+
+### Extra documentation not required for execution
+
+- `ARCHITECTURE.md`
+- `DMD_Cloud_UserGuide.md`
+- `SECURITY.md`
+- `WORKFLOW_GUIDE.md`
+- `WORKFLOW_RUN_STEPS.txt`
+- `.github/workflows/codeql.yml`
+- `.github/workflows/codeql-analysis.yml`
+- `.github/workflows/orig.yml`

@@ -1,0 +1,51 @@
+name: DMD Cloud Production Deploy
+description: Deploy DMD Cloud services to Azure AKS using the repository's production deployment script.
+author: taoufikmohamed
+branding:
+  icon: upload-cloud
+  color: blue
+
+inputs:
+  deepseek_api_key:
+    description: DeepSeek API key used by ai-service.
+    required: true
+  azure_subscription_id:
+    description: Azure subscription ID for deployment.
+    required: false
+    default: ""
+  environment:
+    description: Deployment environment suffix (for example, prod).
+    required: false
+    default: prod
+  location:
+    description: Azure region for deployment (for example, westeurope).
+    required: false
+    default: westeurope
+
+outputs:
+  status:
+    description: Deployment status summary.
+    value: ${{ steps.deploy.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate required tools
+      shell: pwsh
+      run: |
+        foreach ($tool in @('az','kubectl','helm','docker')) {
+          if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            throw "Missing required tool: $tool"
+          }
+        }
+
+    - name: Run production deployment
+      id: deploy
+      shell: pwsh
+      env:
+        INPUT_DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key }}
+        INPUT_AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+        INPUT_ENVIRONMENT: ${{ inputs.environment }}
+        INPUT_LOCATION: ${{ inputs.location }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/scripts/entrypoint.ps1"
