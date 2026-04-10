@@ -1,0 +1,21 @@
+name: Security Scan
+on: [push, pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taoufikmohamed/securityauditor@v2
+        with:
+          repo-path: '.'
+          config-path: 'config/secauditor.yml'
+          mode: 'scan'
+          output-path: 'security-report.json'
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: security-report.json
