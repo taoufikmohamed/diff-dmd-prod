@@ -1,0 +1,22 @@
+name: CI/CD Pipeline
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate action.yml
+        run: |
+          if [ -f action.yml ]; then
+            echo "Validating action.yml..."
+            # Add any validation steps here, e.g., checking the name field
+            grep -q 'name: new' action.yml || (echo "Action name not updated correctly." && exit 1)
+          else
+            echo "action.yml not found."
+            exit 1
+          fi
