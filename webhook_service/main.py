@@ -4,6 +4,7 @@ Receives GitHub webhooks, deduplicates, and dispatches async AI pipeline generat
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -97,6 +98,63 @@ def _save_pipeline(content: str) -> None:
     logger.info("Pipeline saved to %s", out.resolve())
 
 
+async def _save_pipeline_to_github(payload: dict[str, Any], content: str) -> bool:
+    """Create or update generated workflow in the repository that triggered this webhook."""
+    if not AUTO_SAVE_PIPELINE or not content.strip():
+        return False
+
+    if not GITHUB_TOKEN:
+        logger.warning("GITHUB_TOKEN is not configured; cannot save pipeline to repository")
+        return False
+
+    repo_name = payload.get("repository", {}).get("full_name", "")
+    if not repo_name:
+        logger.warning("Cannot save pipeline: missing repository.full_name in payload")
+        return False
+
+    ref = payload.get("ref", "")
+    branch = ""
+    if isinstance(ref, str) and ref.startswith("refs/heads/"):
+        branch = ref.split("/", 2)[2]
+    if not branch:
+        branch = payload.get("repository", {}).get("default_branch", "master")
+
+    path = PIPELINE_OUTPUT_PATH.lstrip("/")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "dmd-webhook-service",
+    }
+    contents_url = f"{GITHUB_API_URL}/repos/{repo_name}/contents/{path}"
+
+    try:
+        sha = None
+        existing = await _http_client.get(contents_url, headers=headers, params={"ref": branch})
+        if existing.status_code == 200:
+            sha = existing.json().get("sha")
+        elif existing.status_code != 404:
+            existing.raise_for_status()
+
+        commit_sha = payload.get("after", "")
+        short_sha = commit_sha[:7] if commit_sha else "manual"
+        body = {
+            "message": f"chore(ci): update generated pipeline for {short_sha}",
+            "content": base64.b64encode((content.strip() + "\n").encode("utf-8")).decode("ascii"),
+            "branch": branch,
+        }
+        if sha:
+            body["sha"] = sha
+
+        upsert = await _http_client.put(contents_url, headers=headers, json=body)
+        upsert.raise_for_status()
+        logger.info("Pipeline committed to %s on branch %s at %s", repo_name, branch, path)
+        return True
+    except Exception as exc:
+        logger.error("Failed to save pipeline to GitHub for %s: %s", repo_name, exc)
+        return False
+
+
 async def _fetch_github_compare_diff(payload: dict[str, Any]) -> str:
     """Fetch raw git diff from GitHub compare API for push events."""
     repo_name = payload.get("repository", {}).get("full_name", "")
@@ -181,7 +239,10 @@ async def _process_webhook(payload: dict[str, Any], max_retries: int = 3) -> Non
                 pipeline_content: str = choices[0].get("message", {}).get("content", "")
                 logger.info("Pipeline generated (%d chars)", len(pipeline_content))
                 try:
-                    _save_pipeline(pipeline_content)
+                    saved = await _save_pipeline_to_github(payload, pipeline_content)
+                    if not saved:
+                        # Keep local write as fallback for local/dev mode.
+                        _save_pipeline(pipeline_content)
                 except Exception as exc:
                     logger.error("Failed to save pipeline: %s", exc)
             return

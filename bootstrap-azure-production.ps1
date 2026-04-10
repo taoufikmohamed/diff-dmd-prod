@@ -209,28 +209,57 @@ function Get-WebhookUrl {
         return "https://$domain/webhook/github"
     }
 
-    $ip = ""
+    $hostOrIp = ""
     for ($i = 0; $i -lt 30; $i++) {
-        $ip = (kubectl get service webhook-service -n $Namespace -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>$null)
-        if (-not [string]::IsNullOrWhiteSpace($ip)) { break }
+        $serviceJson = (kubectl get service webhook-service -n $Namespace -o json 2>$null | Out-String).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($serviceJson)) {
+            try {
+                $serviceObj = $serviceJson | ConvertFrom-Json
+                $ingress = @($serviceObj.status.loadBalancer.ingress)
+                if ($ingress.Count -gt 0) {
+                    $ip = ""
+                    $hostname = ""
+                    if ($null -ne $ingress[0].PSObject.Properties['ip']) {
+                        $ip = "$($ingress[0].ip)".Trim()
+                    }
+                    if ($null -ne $ingress[0].PSObject.Properties['hostname']) {
+                        $hostname = "$($ingress[0].hostname)".Trim()
+                    }
+
+                    if (-not [string]::IsNullOrWhiteSpace($ip)) {
+                        $hostOrIp = $ip
+                        break
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($hostname)) {
+                        $hostOrIp = $hostname
+                        break
+                    }
+                }
+            } catch {
+                # Keep waiting and retry until LoadBalancer endpoint is available.
+            }
+        }
         Start-Sleep -Seconds 10
     }
 
-    if ([string]::IsNullOrWhiteSpace($ip)) {
-        throw "No webhook URL provided and LoadBalancer IP is not available yet. Set WEBHOOK_URL or WEBHOOK_DOMAIN in .env"
+    if ([string]::IsNullOrWhiteSpace($hostOrIp)) {
+        throw "No webhook URL provided and LoadBalancer endpoint (IP/hostname) is not available yet. Set WEBHOOK_URL or WEBHOOK_DOMAIN in .env"
     }
 
     if (-not $AllowHttp) {
         throw "Only HTTP URL could be derived from LoadBalancer IP. Set WEBHOOK_URL/WEBHOOK_DOMAIN for HTTPS, or rerun with -ForceHttpWebhook"
     }
 
-    return "http://$ip/webhook/github"
+    return "http://${hostOrIp}:8001/webhook/github"
 }
 
 function Get-RestErrorMessage {
     param([Parameter(Mandatory=$true)]$ErrorRecord)
 
     $msg = $ErrorRecord.Exception.Message
+    if ($ErrorRecord.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($ErrorRecord.ErrorDetails.Message)) {
+        $msg = "$msg | $($ErrorRecord.ErrorDetails.Message)"
+    }
     try {
         $resp = $ErrorRecord.Exception.Response
         if ($resp -and $resp.GetResponseStream) {
@@ -306,6 +335,23 @@ function Upsert-GitHubWebhook {
     }
     $found = $existing | Where-Object { $_.config.url -eq $WebhookUrl }
 
+    if (-not $found) {
+        try {
+            $targetUri = [System.Uri]$WebhookUrl
+            # Match existing hook by host + path to absorb scheme/port drift from previous runs.
+            $found = $existing | Where-Object {
+                try {
+                    $candidate = [System.Uri]$_.config.url
+                    ($candidate.Host -eq $targetUri.Host) -and ($candidate.AbsolutePath -eq $targetUri.AbsolutePath)
+                } catch {
+                    $false
+                }
+            }
+        } catch {
+            # Keep exact-match behavior only when URL cannot be parsed.
+        }
+    }
+
     $body = @{
         name = "web"
         active = $true
@@ -338,7 +384,22 @@ function Upsert-GitHubWebhook {
             if ($details -match "Hook url" -and $details -match "secure") {
                 throw "GitHub rejected webhook URL '$WebhookUrl' because it is not HTTPS. Set WEBHOOK_URL or WEBHOOK_DOMAIN to an HTTPS endpoint, or use a TLS ingress/domain."
             }
+            if ($details -match "422") {
+                try {
+                    $existingAfter = Invoke-RestMethod -Method GET -Uri $hooksUrl -Headers $headers
+                    $duplicate = $existingAfter | Where-Object { $_.config.url -eq $WebhookUrl }
+                    if ($duplicate) {
+                        Write-Success "Webhook already existed and is now treated as configured ($($duplicate[0].id))"
+                        return
+                    }
+                } catch {
+                    # Keep original 422 handling below.
+                }
+            }
             if ($details -match "422" -and $details -match "Validation Failed") {
+                if ($WebhookUrl -match '^http://') {
+                    throw "GitHub webhook create failed (422). GitHub commonly rejects non-HTTPS webhook URLs for public endpoints. Use WEBHOOK_DOMAIN or WEBHOOK_URL with HTTPS. Details: $details"
+                }
                 throw "GitHub webhook create failed due to validation. Check webhook URL format, repository permissions, and whether an equivalent webhook already exists. Details: $details"
             }
             throw "Failed to create webhook on $Owner/${Repo}: $details"
