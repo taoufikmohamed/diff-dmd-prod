@@ -42,6 +42,10 @@ spec:
           value: "INFO"
         - name: GITHUB_API_URL
           value: "https://api.github.com"
+        - name: AUTO_SAVE_PIPELINE
+          value: "true"
+        - name: PIPELINE_OUTPUT_PATH
+          value: ".github/workflows/ci-cd.yml"
         - name: GITHUB_TOKEN
           valueFrom:
             secretKeyRef:
