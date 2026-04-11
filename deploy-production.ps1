@@ -363,6 +363,25 @@ Write-Host "  ✓ Connected to AKS ($($nodes.Count) nodes ready)" -ForegroundCol
 # Phase 5: Build and Push Images
 Write-Host "`n[Phase 5] Building and Pushing Docker Images..." -ForegroundColor Green
 
+$repoRoot = (Get-Location).Path
+$webhookServicePath = Join-Path $repoRoot "webhook_service"
+$aiServicePath = Join-Path $repoRoot "ai_service"
+
+$requiredBuildFiles = @(
+    (Join-Path $webhookServicePath "Dockerfile"),
+    (Join-Path $webhookServicePath "requirements.txt"),
+    (Join-Path $webhookServicePath "main.py"),
+    (Join-Path $aiServicePath "Dockerfile"),
+    (Join-Path $aiServicePath "requirements.txt"),
+    (Join-Path $aiServicePath "main.py")
+)
+
+foreach ($requiredFile in $requiredBuildFiles) {
+    if (-not (Test-Path $requiredFile)) {
+        throw "Missing required container build file: '$requiredFile'. If running via marketplace action tag (for example @v1), update the tag to include latest files."
+    }
+}
+
 docker info *> $null
 $dockerAvailable = ($LASTEXITCODE -eq 0)
 
@@ -373,7 +392,7 @@ if ($dockerAvailable) {
     }
 
     Write-Host "  Building webhook-service..." -ForegroundColor Gray
-    docker build -t "${acrServer}/webhook-service:latest" -t "${acrServer}/webhook-service:$(Get-Date -Format 'yyyyMMdd-HHmmss')" ./webhook_service
+    docker build -f (Join-Path $webhookServicePath "Dockerfile") -t "${acrServer}/webhook-service:latest" -t "${acrServer}/webhook-service:$(Get-Date -Format 'yyyyMMdd-HHmmss')" $webhookServicePath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to build webhook-service image. Ensure Docker daemon is running."
     }
@@ -384,7 +403,7 @@ if ($dockerAvailable) {
     }
 
     Write-Host "  Building ai-service..." -ForegroundColor Gray
-    docker build -t "${acrServer}/ai-service:latest" -t "${acrServer}/ai-service:$(Get-Date -Format 'yyyyMMdd-HHmmss')" ./ai_service
+    docker build -f (Join-Path $aiServicePath "Dockerfile") -t "${acrServer}/ai-service:latest" -t "${acrServer}/ai-service:$(Get-Date -Format 'yyyyMMdd-HHmmss')" $aiServicePath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to build ai-service image. Ensure Docker daemon is running."
     }
@@ -397,13 +416,13 @@ if ($dockerAvailable) {
     Write-Host "  Docker daemon not available. Falling back to Azure Container Registry remote builds..." -ForegroundColor Yellow
 
     Write-Host "  Remote building webhook-service in ACR..." -ForegroundColor Gray
-    az acr build --registry $acrName --image webhook-service:latest ./webhook_service --output none
+    az acr build --registry $acrName --image webhook-service:latest $webhookServicePath --output none
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to remotely build webhook-service image in ACR '$acrName'."
     }
 
     Write-Host "  Remote building ai-service in ACR..." -ForegroundColor Gray
-    az acr build --registry $acrName --image ai-service:latest ./ai_service --output none
+    az acr build --registry $acrName --image ai-service:latest $aiServicePath --output none
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to remotely build ai-service image in ACR '$acrName'."
     }
