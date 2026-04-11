@@ -53,6 +53,140 @@ $aksName = "dmd-aks-$Environment"
 $preferredAksVmSizes = @("Standard_B2s")
 $effectiveLocation = $Location.ToLower()
 
+function Ensure-AksAcrPullAccess {
+    param(
+        [Parameter(Mandatory = $true)][string]$AksName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$AcrName
+    )
+
+    Write-Host "  Ensuring AKS can pull from ACR..." -ForegroundColor Gray
+
+    $attachOutput = az aks update --name $AksName --resource-group $ResourceGroupName --attach-acr $AcrName --output none 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✓ AKS attached to ACR via az aks update" -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "  Unable to attach ACR using az aks update. Trying direct AcrPull role assignment..." -ForegroundColor Yellow
+
+    $acrId = az acr show --name $AcrName --resource-group $ResourceGroupName --query "id" -o tsv 2>$null
+    $kubeletObjectId = az aks show --name $AksName --resource-group $ResourceGroupName --query "identityProfile.kubeletidentity.objectId" -o tsv 2>$null
+
+    if (!$acrId -or !$kubeletObjectId) {
+        Write-Host "  Warning: Could not determine ACR resource ID or AKS kubelet identity object ID." -ForegroundColor Yellow
+        Write-Host "  Deployment continues, but image pulls may fail until AcrPull is granted." -ForegroundColor Yellow
+        return $false
+    }
+
+    $existingAssignmentCount = az role assignment list --assignee-object-id $kubeletObjectId --scope $acrId --query "[?roleDefinitionName=='AcrPull'] | length(@)" -o tsv 2>$null
+    if ($LASTEXITCODE -eq 0 -and [int]$existingAssignmentCount -gt 0) {
+        Write-Host "  ✓ AcrPull role assignment already exists for AKS kubelet identity" -ForegroundColor Green
+        return $true
+    }
+
+    $roleOutput = az role assignment create --assignee-object-id $kubeletObjectId --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId --output none 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✓ Granted AcrPull role on ACR to AKS kubelet identity" -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "  Warning: Failed to grant AcrPull role automatically." -ForegroundColor Yellow
+    Write-Host "  Required privileges: Owner or User Access Administrator on scope '$acrId'." -ForegroundColor Yellow
+    Write-Host "  AKS may fail to pull images until this role assignment is completed." -ForegroundColor Yellow
+    return $false
+}
+
+function Test-ArmActionAllowed {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Actions,
+        [Parameter(Mandatory = $false)][string[]]$NotActions,
+        [Parameter(Mandatory = $true)][string]$TargetAction
+    )
+
+    $normalizedActions = @($Actions | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($normalizedActions.Count -eq 0) {
+        return $false
+    }
+
+    $isAllowed = $false
+    foreach ($actionPattern in $normalizedActions) {
+        if ($TargetAction -like $actionPattern) {
+            $isAllowed = $true
+            break
+        }
+    }
+
+    if (-not $isAllowed) {
+        return $false
+    }
+
+    foreach ($denyPattern in @($NotActions | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        if ($TargetAction -like $denyPattern) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Assert-AksWritePermissionPreflight {
+    param(
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$AksName,
+        [Parameter(Mandatory = $true)][string]$PrincipalIdentifier
+    )
+
+    $requiredAction = "Microsoft.ContainerService/managedClusters/write"
+    $scope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName"
+
+    Write-Host "  RBAC preflight: checking '$requiredAction' on '$scope' for '$PrincipalIdentifier'..." -ForegroundColor Gray
+
+    $roleNamesJson = az role assignment list --assignee $PrincipalIdentifier --scope $scope --include-inherited --query "[].roleDefinitionName" -o json 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($roleNamesJson)) {
+        throw "RBAC preflight failed: could not read role assignments for '$PrincipalIdentifier' at '$scope'. Ensure this identity can read role assignments and is in the correct subscription context."
+    }
+
+    $roleNames = @($roleNamesJson | ConvertFrom-Json | Select-Object -Unique)
+    if ($roleNames.Count -eq 0) {
+        throw "RBAC preflight failed: '$PrincipalIdentifier' has no role assignments at '$scope'. Required action: '$requiredAction'. Grant 'Azure Kubernetes Service Contributor' (recommended) or 'Contributor' on resource group '$ResourceGroupName', then re-authenticate and rerun."
+    }
+
+    $canWriteAks = $false
+    foreach ($roleName in $roleNames) {
+        $roleDefsJson = az role definition list --name $roleName -o json 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($roleDefsJson)) {
+            continue
+        }
+
+        $roleDefs = @($roleDefsJson | ConvertFrom-Json)
+        foreach ($roleDef in $roleDefs) {
+            foreach ($permissionBlock in @($roleDef.permissions)) {
+                if (Test-ArmActionAllowed -Actions @($permissionBlock.actions) -NotActions @($permissionBlock.notActions) -TargetAction $requiredAction) {
+                    $canWriteAks = $true
+                    break
+                }
+            }
+
+            if ($canWriteAks) {
+                break
+            }
+        }
+
+        if ($canWriteAks) {
+            break
+        }
+    }
+
+    if (-not $canWriteAks) {
+        $assignedRoles = ($roleNames -join ", ")
+        throw "RBAC preflight failed before AKS create. Identity '$PrincipalIdentifier' does not allow '$requiredAction' at '$scope'. Current roles: [$assignedRoles]. Fix: assign 'Azure Kubernetes Service Contributor' on resource group '$ResourceGroupName' (or equivalent custom role containing '$requiredAction'). If you use '--attach-acr', also grant 'User Access Administrator' or 'Owner' at the ACR scope for role-assignment operations. Then refresh credentials and rerun. AKS target: '$AksName'."
+    }
+
+    Write-Host "  ✓ RBAC preflight passed for AKS write" -ForegroundColor Green
+}
+
 # 3.1 Create Resource Group first
 Write-Host "  Ensuring resource group exists: $rgName" -ForegroundColor Gray
 $existingRgLocation = az group show --name $rgName --query "location" -o tsv 2>$null
@@ -85,6 +219,9 @@ if (!$acrExists) {
 
 $acrServer = az acr show --name $acrName --resource-group $rgName --query "loginServer" -o tsv
 
+$principalIdentifier = $currentAccount.user.name
+Assert-AksWritePermissionPreflight -SubscriptionId $currentAccount.id -ResourceGroupName $rgName -AksName $aksName -PrincipalIdentifier $principalIdentifier
+
 # 3.3 Create AKS cluster third
 $aksExists = az aks show --name $aksName --resource-group $rgName --query "name" -o tsv 2>$null
 if (!$aksExists) {
@@ -108,6 +245,19 @@ if (!$aksExists) {
             --attach-acr $acrName `
             --generate-ssh-keys `
             --output none 2>&1 | Out-String
+
+        if ($LASTEXITCODE -ne 0 -and $createOutput -match "Could not create a role assignment for ACR|Are you an Owner on this subscription|AuthorizationFailed") {
+            Write-Host "  AKS create failed while attaching ACR. Retrying AKS create without --attach-acr..." -ForegroundColor Yellow
+            $createOutput = az aks create `
+                --name $aksName `
+                --resource-group $rgName `
+                --location $effectiveLocation `
+                --node-count $aksNodeCount `
+                --node-vm-size $vmSize `
+                --enable-managed-identity `
+                --generate-ssh-keys `
+                --output none 2>&1 | Out-String
+        }
 
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  AKS cluster created using VM size: $vmSize" -ForegroundColor Green
@@ -172,12 +322,16 @@ if (!$aksExists) {
     if (!$aksCreated) {
         throw "Failed to create AKS '$aksName'. Tried preferred and allowed fallback sizes in '$effectiveLocation'. Last error: $lastAksCreateError"
     }
+
+    $acrAccessReady = Ensure-AksAcrPullAccess -AksName $aksName -ResourceGroupName $rgName -AcrName $acrName
+    if (!$acrAccessReady) {
+        Write-Host "  Continuing deployment without blocking on ACR role assignment." -ForegroundColor Yellow
+    }
 } else {
     Write-Host "  AKS already exists: $aksName" -ForegroundColor Gray
-    Write-Host "  Ensuring AKS can pull from ACR..." -ForegroundColor Gray
-    az aks update --name $aksName --resource-group $rgName --attach-acr $acrName --output none
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to update AKS '$aksName' with ACR pull permissions."
+    $acrAccessReady = Ensure-AksAcrPullAccess -AksName $aksName -ResourceGroupName $rgName -AcrName $acrName
+    if (!$acrAccessReady) {
+        Write-Host "  Continuing deployment without blocking on ACR role assignment." -ForegroundColor Yellow
     }
 }
 
